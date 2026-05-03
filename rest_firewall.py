@@ -58,6 +58,7 @@ from ryu.ofproto import ofproto_v1_3_parser
 #
 # set enable the firewall switches
 # PUT /firewall/module/enable/{switch-id}
+# (enable also adds low-priority IPv4 ALLOW->NORMAL for ports without an explicit ACL rule)
 #
 # set disable the firewall switches
 # PUT /firewall/module/disable/{switch-id}
@@ -187,6 +188,11 @@ ARP_FLOW_PRIORITY = ofproto_v1_3_parser.UINT16_MAX - 1
 LOG_FLOW_PRIORITY = 0
 ACL_FLOW_PRIORITY_MIN = LOG_FLOW_PRIORITY + 1
 ACL_FLOW_PRIORITY_MAX = ofproto_v1_3_parser.UINT16_MAX - 2
+
+# Baseline IPv4 forward priority (must stay below PACKETIN/DENY/user rules you add).
+DEFAULT_IPV4_PERMIT_PRIORITY = 2
+# Identifies the default-permit flow so DELETE rule_id=all does not remove it.
+DEFAULT_IPV4_PERMIT_COOKIE = 0xFFFFFFFE
 
 VLANID_NONE = 0
 VLANID_MIN = 2
@@ -650,9 +656,27 @@ class Firewall(object):
         cmd = self.dp.ofproto.OFPFC_DELETE_STRICT
         self.ofctl.mod_flow_entry(self.dp, flow, cmd)
 
+        # Push match-all-IPv4 NORMAL so traffic still forwards unless a higher rule matches.
+        self.set_default_ipv4_permit_flow()
+
         msg = {'result': 'success',
                'details': 'firewall running.'}
         return REST_COMMAND_RESULT, msg
+
+    # Same effect as POST dl_type IPv4, actions ALLOW, priority DEFAULT_IPV4_PERMIT_PRIORITY.
+    def set_default_ipv4_permit_flow(self):
+        rest = {
+            REST_DL_TYPE: REST_DL_TYPE_IPV4,
+            REST_ACTION: REST_ACTION_ALLOW,
+        }
+        priority = DEFAULT_IPV4_PERMIT_PRIORITY
+        match = Match.to_openflow(rest)
+        actions = Action.to_openflow(rest)
+        cookie = DEFAULT_IPV4_PERMIT_COOKIE
+        flow = self._to_of_flow(
+            cookie=cookie, priority=priority, match=match, actions=actions)
+        cmd = self.dp.ofproto.OFPFC_ADD
+        self.ofctl.mod_flow_entry(self.dp, flow, cmd)
 
     @rest_command
     def get_log_status(self, waiters):
@@ -823,6 +847,9 @@ class Firewall(object):
                 if (priority != STATUS_FLOW_PRIORITY
                         and priority != ARP_FLOW_PRIORITY
                         and priority != LOG_FLOW_PRIORITY):
+                    # Bulk delete skips the built-in default permit (delete by rule_id if needed).
+                    if rule_id == REST_ALL and cookie == DEFAULT_IPV4_PERMIT_COOKIE:
+                        continue
                     if ((rule_id == REST_ALL or rule_id == ruleid) and
                             (vlan_id == dl_vlan or vlan_id == REST_ALL)):
                         match = Match.to_mod_openflow(flow_stat[REST_MATCH])
