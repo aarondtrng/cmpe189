@@ -8,16 +8,17 @@ from ryu.lib.packet import packet, ethernet, ipv4
 import json
 import urllib.request
 import urllib.error
+import time
 
-FIREWALL_API = "http://127.0.0.1:8080/firewall/all"
+FIREWALL_API = "http://127.0.0.1:8080/firewall/rules/all"
 POLL_INTERVAL = 5        
-PACKET_THRESHOLD = 100      
+PACKET_THRESHOLD = 1000      
 
 class FloodDetector(app_manager.RyuApp):
     """
-    Polls OF flow stats every POLL_INTERVAL seconds.
-    If any source IP exceeds PACKET_THRESHHOLD in that
-    window, a DENY rule is installed by rest_firewall.
+    Detects floods attacks by counting PacketIn events per source IP.
+    Every POLL_INTERVAL seconds, any source IP that exceeded PACKET_THRESHOLD
+    packets in that window is automatically blocked by rest_firewall REST API.
     """
 
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
@@ -25,16 +26,20 @@ class FloodDetector(app_manager.RyuApp):
     def __init__(self, *args, **kwargs):
         super(FloodDetector, self).__init__(*args, **kwargs)
         self.datapaths = {}
-        self.last_packet_counts = {}
         self.blocked_ips = set()
+
+        # packet counter: {src_ip: count} for current window
+        self.packet_counts = {}
+        self.window_start = time.time()
+
         self.monitor_thread = hub.spawn(self._monitor)
 
     @set_ev_cls(ofp_event.EventOFPStateChange, [MAIN_DISPATCHER, CONFIG_DISPATCHER])
     def state_change_handler(self, ev):
         """
         Fires when a switch connects or disconnects.
-        Allows to track connected switches so we know
-        who to request stats from.
+        Tracks connected switches to know which datapaths
+        are active.
         """
         datapath = ev.datapath
         if ev.state == MAIN_DISPATCHER:
@@ -47,66 +52,51 @@ class FloodDetector(app_manager.RyuApp):
 
     def _monitor(self):
         """
-        Runs forever in the background.
-        Every POLL_INTERVAL seconds, asks each switch for flow stats.
+        Sleeps for POLL_INTERVAL seconds, then checks if any source IP
+        exceeded the packet threshold in that window. After checking,
+        resets counter dict and window timestamp for the next interval.
         """
         while True:
-            for dp in self.datapaths.values():
-                self._request_flow_stats(dp)
             hub.sleep(POLL_INTERVAL)
+            self._check_for_floods()
+            self.packet_counts = {}
+            self.window_start = time.time()
 
-    def _request_flow_stats(self, datapath):
+    @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
+    def packet_in_handler(self, ev):
         """
-        Sends an OF FlowStatsRequest to the switch.
-        The switch will reply with an EventOFPFlowStatsReply event.
+        Fires whenever the switch sends a packet to controller.
+        Parse the ipv4 layer to get the source IP and increment
+        its counter.
         """
-        ofproto = datapath.ofproto
-        parser = datapath.ofproto_parser
+        msg = ev.msg
+        pkt = packet.Packet(msg.data)
 
-        req = parser.OFPFlowStatsRequest(
-            datapath, 
-            table_id=ofproto.OFPTT_ALL
-            )
-        datapath.send_msg(req)
-
-    @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
-    def flow_stats_reply_handler(self, ev):
-        """
-        Fires when the switch responds to the stats request.
-        Loop through every flow entry and accumulate packet
-        counts grouped by source IP.
-        """
-        body = ev.msg.body
-        current_counts = {}
-
-        for stat in body:
-            src_ip = stat.match.get('ipv4_src')
-            if src_ip is None:
-                continue
-            
-            current_counts[src_ip] = (
-                current_counts.get(src_ip, 0) + stat.packet_count
-            )
-
-        self._check_for_floods(current_counts)
-        self.last_packet_counts = current_counts
+        # Only process IPv4 packets
+        ip_pkt = pkt.get_protocol(ipv4.ipv4)
+        if ip_pkt is None:
+            return
+        
+        src_ip = ip_pkt.src
+        if src_ip in self.blocked_ips:
+            return
+        
+        # Increment counter for this source IP
+        self.packet_counts[src_ip] = self.packet_counts.get(src_ip, 0) + 1
 
     def _check_for_floods(self, current_counts):
         """
-        Compares current packet counts to last poll.
-        If the increase (delta) exceeds PACKET_THRESHOLD, block the IP.
+        Called at the end of each POLL_INTERVAL window.
+        Iterates through all source IPs seen in this window
+        and checks if any exceeded PACKET_THRESHOLD.
         """
-        for src_ip, count in current_counts.items():
+        for src_ip, count in self.packet_counts.items():
             if src_ip in self.blocked_ips:
                 continue
-
-            last_count = self.last_packet_counts.get(src_ip, 0)
-            delta = count - last_count  # packets sent in this interval
-
-            if delta > PACKET_THRESHOLD:
+            if count > PACKET_THRESHOLD:
                 self.logger.warning(
-                    "FLOOD DETECTED: src=%s sent %d packets in %ds",
-                    src_ip, delta, POLL_INTERVAL
+                    "[WARNING] FLOOD DETECTED: src=%s sent %d packets in %ds",
+                    src_ip, count, POLL_INTERVAL
                 )
                 self._install_deny_rule(src_ip)
 
