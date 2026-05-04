@@ -20,6 +20,7 @@ _BAD_PORT_PACKETIN_PRIORITY = "3500"
 _ALLOW_PORT_PRIORITY = "4000"
 _DENY_PRIORITY = "4500"
 
+# Denied ports
 BAD_TCP_PORTS = {
     31, 1170, 1234, 1243, 1981, 2001, 2023, 2989, 3024,
     3150, 3700, 4950, 6346, 6400, 6667, 6670, 12345,
@@ -31,9 +32,9 @@ BAD_UDP_PORTS = {
     2140, 18753, 20433, 27444, 31335
 }
 
-# Explicit ALLOW on tp_dst (any source). Use to keep ports open even if listed in BAD_* or for normal services.
-ALLOW_TCP_PORTS = {1,100,400,800,}
-ALLOW_UDP_PORTS = {12, 200,300,700,}
+# Allowed ports 
+ALLOW_TCP_PORTS = {1,100,400,800}
+ALLOW_UDP_PORTS = {12, 200,300,700}
 
 
 class BadPortDetector(app_manager.RyuApp):
