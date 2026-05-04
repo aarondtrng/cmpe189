@@ -1,4 +1,4 @@
-# Flow + port stats -> rest_firewall DENY on spike; one in_port per poll; optional timed DELETE (AUTO_UNBLOCK_SECONDS).
+# Flow + port stats -> DENY on delta; worst in_port only per poll; optional auto DELETE.
 from ryu.base import app_manager
 from ryu.controller import ofp_event
 from ryu.controller.handler import MAIN_DISPATCHER, CONFIG_DISPATCHER, set_ev_cls
@@ -16,8 +16,7 @@ FIREWALL_API = "http://127.0.0.1:8080/firewall/rules/all"
 POLL_INTERVAL = 1
 PACKET_THRESHOLD = 100
 _DENY_PRIORITY = "4500"
-# 0 = keep DENY; else DELETE that rule after N seconds.
-AUTO_UNBLOCK_SECONDS = 10
+AUTO_UNBLOCK_SECONDS = 10  # 0 = never remove DENY; else DELETE via REST after N s.
 
 
 def _normalize_ip(raw):
@@ -35,6 +34,7 @@ def _normalize_ip(raw):
 
 
 def _identity_from_match(match):
+    # Prefer nw_src/ipv4_src, else in_port, else dl_src (for flow-stat aggregation keys).
     if match is None:
         return None
     ip = _normalize_ip(match.get("nw_src") or match.get("ipv4_src"))
@@ -56,6 +56,7 @@ def _blocked_key(kind, value):
 
 
 def _port_packet_total(stat):
+    # rx+tx packet counts on a switch port (OVS port stats).
     rx = int(getattr(stat, "rx_packets", 0) or 0)
     tx = int(getattr(stat, "tx_packets", 0) or 0)
     if rx == 0 and tx == 0 and hasattr(stat, "packet_count"):
@@ -64,6 +65,7 @@ def _port_packet_total(stat):
 
 
 def _extract_rule_id_from_post_response(text):
+    # rest_firewall POST reply text includes "rule_id=N" for timed DELETE.
     m = re.search(r"rule_id=(\d+)", text)
     if m:
         return int(m.group(1))
@@ -74,6 +76,7 @@ class FloodDetector(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
 
     def __init__(self, *args, **kwargs):
+        # Per-dpid flow/port totals; blocked_keys avoids repeat POSTs until auto-unblock clears them.
         super(FloodDetector, self).__init__(*args, **kwargs)
         self.datapaths = {}
         self.blocked_keys = set()
@@ -99,6 +102,7 @@ class FloodDetector(app_manager.RyuApp):
                 self.logger.info("Switch disconnected: dpid=%s", datapath.id)
 
     def _monitor(self):
+        # Request stats for all switches, then sleep POLL_INTERVAL (deltas are between replies).
         while True:
             for dp in list(self.datapaths.values()):
                 self._request_flow_stats(dp)
@@ -119,6 +123,7 @@ class FloodDetector(app_manager.RyuApp):
 
     @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
     def flow_stats_reply_handler(self, ev):
+        # First reply per switch: store baseline only (skip flood check).
         dpid = ev.msg.datapath.id
         current = {}
 
@@ -140,6 +145,7 @@ class FloodDetector(app_manager.RyuApp):
 
     @set_ev_cls(ofp_event.EventOFPPortStatsReply, MAIN_DISPATCHER)
     def port_stats_reply_handler(self, ev):
+        # Same baseline idea as flow stats; counters cover traffic on catch-all ip flows too.
         dpid = ev.msg.datapath.id
         ofproto = ev.msg.datapath.ofproto
         current = {}
@@ -162,7 +168,7 @@ class FloodDetector(app_manager.RyuApp):
         self._last_port_totals[dpid] = current
 
     def _gather_flood_violations(self, current_totals, last_totals):
-        # Only one in_port offender per poll (largest delta); ip/dl_src can each still trip.
+        # One worst in_port per poll; each ip:/dl_src: over threshold stays separate.
         violations = []
         port_candidates = []
 
@@ -197,6 +203,7 @@ class FloodDetector(app_manager.RyuApp):
             self._install_deny_rule(key)
 
     def _install_deny_rule(self, key):
+        # key is "ip:...", "in_port:...", or "dl_src:..."; POST then maybe schedule DELETE.
         if key in self.blocked_keys:
             return
         kind, sep, value = key.partition(":")
@@ -251,6 +258,7 @@ class FloodDetector(app_manager.RyuApp):
             self.logger.error("Failed to install deny rule: %s", e)
 
     def _delete_firewall_rule(self, rule_id):
+        # DELETE body is {"rule_id": "<int>|all"} on same URL as POST rules.
         body = json.dumps({"rule_id": str(rule_id)}).encode("utf-8")
         req = urllib.request.Request(
             FIREWALL_API,
@@ -262,6 +270,7 @@ class FloodDetector(app_manager.RyuApp):
             return resp.read().decode("utf-8", errors="replace")
 
     def _auto_unblock_rule(self, blocked_key, rule_id):
+        # hub.spawn target: remove DENY and clear blocked_keys so detection can run again.
         hub.sleep(AUTO_UNBLOCK_SECONDS)
         if blocked_key not in self.blocked_keys:
             return

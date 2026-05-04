@@ -48,7 +48,7 @@ def build_rule(
     tp_dst: str | int | None = None,
     in_port: str | int | None = None,
 ) -> dict:
-    """Build a JSON body for POST /firewall/rules/{switch-id}."""
+    # Body keys match rest_firewall (dl_type, nw_src, nw_proto, tp_dst, actions, priority, ...).
     action = action.upper()
     if action not in ("ALLOW", "DENY", "PACKETIN"):
         raise ValueError("action must be ALLOW, DENY, or PACKETIN")
@@ -90,6 +90,7 @@ def http_request(
     data: bytes | None = None,
     timeout: float = 10.0,
 ) -> tuple[int, str]:
+    # Returns (status, body); HTTP errors still return a body string.
     req = urllib.request.Request(
         url,
         data=data,

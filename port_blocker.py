@@ -1,5 +1,4 @@
-# Ryu app: PACKETIN on bad TCP/UDP ports, then per-source DENY via rest_firewall.
-# Broad IPv4 allow is installed by rest_firewall when you PUT /firewall/module/enable.
+# Bad-port PACKETIN + PacketIn -> DENY by nw_src. Default IPv4 allow: PUT .../module/enable in rest_firewall.
 from ryu.base import app_manager
 from ryu.controller import ofp_event
 from ryu.controller.handler import MAIN_DISPATCHER, set_ev_cls
@@ -32,12 +31,11 @@ BAD_UDP_PORTS = {
 
 
 class BadPortDetector(app_manager.RyuApp):
-    # Track posted DENYs and start the REST baseline worker once Ryu is running.
     def __init__(self, *args, **kwargs):
         super(BadPortDetector, self).__init__(*args, **kwargs)
-        self.blocked_signatures = set()
+        self.blocked_signatures = set()  # Dedupe DENY POSTs per (src, proto, port).
         self._baseline_done = False
-        hub.spawn(self._firewall_baseline_worker)
+        hub.spawn(self._firewall_baseline_worker)  # Enable firewall + PACKETIN rows when REST is up.
 
     # Single HTTP call to the firewall REST API (GET/PUT/POST).
     def _firewall_request(self, method, url, body=None, timeout=5.0):
@@ -61,8 +59,8 @@ class BadPortDetector(app_manager.RyuApp):
                 out.extend(acl.get("rules", []))
         return out
 
-    # Retry installing baseline rules until REST is reachable (WSGI starts after app load).
     def _firewall_baseline_worker(self):
+        # WSGI may lag app load; retry until baseline succeeds.
         hub.sleep(2.5)
         attempt = 0
         while not self._baseline_done:
@@ -87,7 +85,6 @@ class BadPortDetector(app_manager.RyuApp):
         self._firewall_request("PUT", enable_url)
         rules = self._get_rules_flat()
 
-        # True if a PACKETIN rule for this proto/port is already installed.
         def has_packetin(proto, port):
             ps = str(port)
             for r in rules:
