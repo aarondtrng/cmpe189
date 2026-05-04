@@ -1,4 +1,5 @@
-# Bad-port PACKETIN + PacketIn -> DENY by nw_src. Default IPv4 allow: PUT .../module/enable in rest_firewall.
+# Bad-port PACKETIN + PacketIn -> DENY by nw_src. Optional ALLOW_TCP/UDP_PORTS bypass PACKETIN and DENY.
+# Default IPv4 permit: PUT .../module/enable in rest_firewall.
 from ryu.base import app_manager
 from ryu.controller import ofp_event
 from ryu.controller.handler import MAIN_DISPATCHER, set_ev_cls
@@ -14,8 +15,9 @@ FIREWALL_API = "http://127.0.0.1:8080/firewall/rules/all"
 _FIREWALL_PARSED = urlparse(FIREWALL_API)
 FIREWALL_BASE = f"{_FIREWALL_PARSED.scheme}://{_FIREWALL_PARSED.netloc}"
 
-# OpenFlow: PACKETIN/DENY priorities must stay above rest_firewall's default IPv4 permit (priority 2).
+# Priorities above default IPv4 permit (2). ALLOW > PACKETIN so whitelisted dst ports never hit the controller.
 _BAD_PORT_PACKETIN_PRIORITY = "3500"
+_ALLOW_PORT_PRIORITY = "4000"
 _DENY_PRIORITY = "4500"
 
 BAD_TCP_PORTS = {
@@ -28,6 +30,10 @@ BAD_TCP_PORTS = {
 BAD_UDP_PORTS = {
     2140, 18753, 20433, 27444, 31335
 }
+
+# Explicit ALLOW on tp_dst (any source). Use to keep ports open even if listed in BAD_* or for normal services.
+ALLOW_TCP_PORTS = {1,100,400,800,}
+ALLOW_UDP_PORTS = {12, 200,300,700,}
 
 
 class BadPortDetector(app_manager.RyuApp):
@@ -69,7 +75,7 @@ class BadPortDetector(app_manager.RyuApp):
                 self._try_install_firewall_baseline()
                 self._baseline_done = True
                 self.logger.info(
-                    "Firewall baseline OK (attempt %d): bad-port PACKETIN rules",
+                    "Firewall baseline OK (attempt %d): allow + bad-port PACKETIN rules",
                     attempt,
                 )
                 return
@@ -96,7 +102,46 @@ class BadPortDetector(app_manager.RyuApp):
                     return True
             return False
 
+        def has_allow_port(proto, port):
+            ps = str(port)
+            for r in rules:
+                if r.get("actions") != "ALLOW":
+                    continue
+                if r.get("dl_type") != "IPv4" or r.get("nw_proto") != proto:
+                    continue
+                if str(r.get("tp_dst", "")) == ps:
+                    return True
+            return False
+
+        for port in sorted(ALLOW_TCP_PORTS):
+            if has_allow_port("TCP", port):
+                continue
+            self._send_rule(
+                {
+                    "priority": _ALLOW_PORT_PRIORITY,
+                    "dl_type": "IPv4",
+                    "nw_proto": "TCP",
+                    "tp_dst": str(port),
+                    "actions": "ALLOW",
+                }
+            )
+
+        for port in sorted(ALLOW_UDP_PORTS):
+            if has_allow_port("UDP", port):
+                continue
+            self._send_rule(
+                {
+                    "priority": _ALLOW_PORT_PRIORITY,
+                    "dl_type": "IPv4",
+                    "nw_proto": "UDP",
+                    "tp_dst": str(port),
+                    "actions": "ALLOW",
+                }
+            )
+
         for port in BAD_TCP_PORTS:
+            if port in ALLOW_TCP_PORTS:
+                continue
             if has_packetin("TCP", port):
                 continue
             self._send_rule(
@@ -110,6 +155,8 @@ class BadPortDetector(app_manager.RyuApp):
             )
 
         for port in BAD_UDP_PORTS:
+            if port in ALLOW_UDP_PORTS:
+                continue
             if has_packetin("UDP", port):
                 continue
             self._send_rule(
@@ -193,6 +240,8 @@ class BadPortDetector(app_manager.RyuApp):
         udp_pkt = pkt.get_protocol(udp.udp)
 
         if tcp_pkt:
+            if tcp_pkt.dst_port in ALLOW_TCP_PORTS:
+                return
             if tcp_pkt.dst_port in BAD_TCP_PORTS:
                 self.logger.warning(
                     "Bad TCP port detected: src=%s dst=%s port=%s",
@@ -203,6 +252,8 @@ class BadPortDetector(app_manager.RyuApp):
                 self.install_deny_rule(ip_pkt.src, "TCP", tcp_pkt.dst_port)
 
         elif udp_pkt:
+            if udp_pkt.dst_port in ALLOW_UDP_PORTS:
+                return
             if udp_pkt.dst_port in BAD_UDP_PORTS:
                 self.logger.warning(
                     "Bad UDP port detected: src=%s dst=%s port=%s",
