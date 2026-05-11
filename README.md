@@ -1,8 +1,6 @@
-<<<<<<< HEAD
 # SDN Firewall using RYU and OpenFlow
-TODO
-=======
-# Install (macOS and Windows)
+
+# Installation (macOS and Windows)
 
 ## Get the code
 
