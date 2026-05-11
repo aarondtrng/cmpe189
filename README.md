@@ -1,8 +1,8 @@
 # SDN Firewall using RYU and OpenFlow
 
-# Installation (macOS and Windows)
+### Installation (macOS and Windows)
 
-## Get the code
+### Get the code
 
 Put the project in **any folder** you want—for example clone the repo or unpack a zip into that folder.
 
@@ -101,11 +101,6 @@ Optional (for quick network topologies):
 sudo apt install -y mininet
 ```
 
-### macOS note
-
-OVS/Mininet are primarily maintained for Linux. If you need a full OpenFlow lab environment on macOS, the most reliable approach is a Linux VM (or remote Linux host) running OVS/Mininet, with Ryu running either on that VM or on your machine.
-
----
 
 ## Running Ryu firewall (all platforms)
 
@@ -113,7 +108,14 @@ OVS/Mininet are primarily maintained for Linux. If you need a full OpenFlow lab 
 2. Open a terminal in this repo folder.
 3. Start Ryu with `rest_firewall.py` first.
 
-Run everything:
+
+Start topology:
+
+```bash
+sudo mn --topo single,4 --mac --controller=remote –switch \ ovs,protocols=OpenFlow13 
+```
+
+Run Firewall:
 
 ```bash
 ryu-manager rest_firewall.py port_blocker.py allow_rules.py flood_detector.py
@@ -124,5 +126,3 @@ Check current firewall rules:
 ```bash
 python manage_firewall.py list
 ```
-
->>>>>>> e8725db (add installation)
